@@ -1,5 +1,6 @@
 import re
 import io
+import math
 import nltk
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -24,63 +25,158 @@ app = Flask(__name__)
 CORS(app)
 
 # ---------------------------------------------------------------------------
-# Constants
+# NLP primitives
 # ---------------------------------------------------------------------------
 
 STOP_WORDS = set(stopwords.words('english'))
 STEMMER = PorterStemmer()
 
-# Synonym map: every key normalises to its canonical form (the value).
-# Keys include both directions so matching works both ways.
+def stem(word: str) -> str:
+    return STEMMER.stem(word.lower())
+
+# ---------------------------------------------------------------------------
+# Synonym / alias map  →  canonical token
+# Both directions included so normalisation works from either side.
+# ---------------------------------------------------------------------------
 SYNONYM_MAP = {
-    # JS ecosystem
-    'reactjs': 'react',
-    'react.js': 'react',
-    'nodejs': 'node',
-    'node.js': 'node',
-    'expressjs': 'express',
-    'express.js': 'express',
-    'vuejs': 'vue',
-    'vue.js': 'vue',
-    'nextjs': 'next',
-    'next.js': 'next',
-    'nuxtjs': 'nuxt',
-    'nuxt.js': 'nuxt',
+    # JS framework aliases
+    'react.js': 'react', 'reactjs': 'react',
+    'next.js': 'nextjs', 'nextjs': 'nextjs',
+    'vue.js': 'vue', 'vuejs': 'vue',
+    'angular.js': 'angular', 'angularjs': 'angular',
+    'node.js': 'node', 'nodejs': 'node',
+    'express.js': 'express', 'expressjs': 'express',
+    'nuxt.js': 'nuxt', 'nuxtjs': 'nuxt',
+    # Language shorthands
     'js': 'javascript',
     'ts': 'typescript',
+    'py': 'python',
     # Cloud
-    'aws': 'amazon web services',
+    'aws': 'aws',
     'amazon web services': 'aws',
-    'gcp': 'google cloud platform',
-    'google cloud': 'google cloud platform',
+    'gcp': 'gcp',
+    'google cloud platform': 'gcp',
+    'google cloud': 'gcp',
+    'azure': 'azure',
+    'microsoft azure': 'azure',
     # DevOps
-    'ci/cd': 'continuous integration',
-    'cicd': 'continuous integration',
-    'continuous integration continuous deployment': 'continuous integration',
-    'continuous integration/continuous deployment': 'continuous integration',
+    'ci/cd': 'cicd', 'ci cd': 'cicd',
+    'continuous integration': 'cicd',
+    'continuous integration continuous deployment': 'cicd',
+    'continuous integration/continuous deployment': 'cicd',
     # DB
-    'postgresql': 'postgres',
-    'postgres': 'postgres',
-    'mongodb': 'mongo',
-    'mongo db': 'mongo',
+    'postgresql': 'postgres', 'postgres': 'postgres',
+    'mongodb': 'mongodb', 'mongo': 'mongodb', 'mongo db': 'mongodb',
     # API
-    'rest api': 'restful api',
-    'restful api': 'restful api',
-    'rest apis': 'restful api',
-    'restful apis': 'restful api',
-    # ML / Data
-    'ml': 'machine learning',
-    'dl': 'deep learning',
-    'nlp': 'natural language processing',
-    'cv': 'computer vision',
-    'ai': 'artificial intelligence',
+    'rest api': 'rest', 'rest apis': 'rest',
+    'restful api': 'rest', 'restful apis': 'rest',
+    'graphql api': 'graphql',
     # Misc
     'k8s': 'kubernetes',
+    'ml': 'machine learning',
+    'ai': 'artificial intelligence',
+    'nlp': 'natural language processing',
     'tf': 'tensorflow',
-    'pytorch': 'pytorch',
 }
 
-# Section header patterns used to detect resume sections
+# ---------------------------------------------------------------------------
+# Skill Clusters
+# Each cluster: name → {members, transferable}
+# transferable: other skills that earn partial credit when a member is missing
+# ---------------------------------------------------------------------------
+SKILL_CLUSTERS = {
+    'Frontend': {
+        'members': {'react', 'nextjs', 'angular', 'vue', 'svelte',
+                    'javascript', 'typescript', 'html', 'css', 'tailwind',
+                    'redux', 'webpack', 'vite'},
+        'transferable': {
+            # If JD wants react but resume has nextjs → high credit
+            'react': [('nextjs', 0.9), ('angular', 0.5), ('vue', 0.5)],
+            'nextjs': [('react', 0.85)],
+            'angular': [('react', 0.5), ('vue', 0.5)],
+            'vue': [('react', 0.5), ('angular', 0.5)],
+            'javascript': [('typescript', 0.9)],
+            'typescript': [('javascript', 0.8)],
+        },
+    },
+    'Backend': {
+        'members': {'node', 'express', 'django', 'flask', 'fastapi',
+                    'spring', 'laravel', 'rails', 'rest', 'graphql',
+                    'grpc', 'microservices', 'serverless'},
+        'transferable': {
+            'node': [('express', 0.85), ('django', 0.5), ('flask', 0.5)],
+            'express': [('node', 0.85), ('fastapi', 0.6), ('flask', 0.6)],
+            'django': [('flask', 0.7), ('fastapi', 0.7)],
+            'flask': [('fastapi', 0.8), ('django', 0.7)],
+            'rest': [('graphql', 0.7), ('grpc', 0.6)],
+            'graphql': [('rest', 0.7)],
+        },
+    },
+    'Databases': {
+        'members': {'postgres', 'mysql', 'sqlite', 'mongodb', 'redis',
+                    'elasticsearch', 'cassandra', 'dynamodb', 'oracle',
+                    'mssql', 'mariadb'},
+        'transferable': {
+            'postgres': [('mysql', 0.8), ('mariadb', 0.8), ('oracle', 0.6), ('mssql', 0.6)],
+            'mysql': [('postgres', 0.8), ('mariadb', 0.85), ('sqlite', 0.6)],
+            'mongodb': [('dynamodb', 0.6), ('cassandra', 0.5), ('redis', 0.5)],
+            'redis': [('elasticsearch', 0.5), ('mongodb', 0.4)],
+            'dynamodb': [('mongodb', 0.6), ('cassandra', 0.55)],
+        },
+    },
+    'Cloud & DevOps': {
+        'members': {'aws', 'gcp', 'azure', 'docker', 'kubernetes', 'cicd',
+                    'jenkins', 'github actions', 'terraform', 'ansible',
+                    'helm', 'linux', 'nginx', 'prometheus', 'grafana'},
+        'transferable': {
+            'aws': [('gcp', 0.7), ('azure', 0.7)],
+            'gcp': [('aws', 0.7), ('azure', 0.7)],
+            'azure': [('aws', 0.7), ('gcp', 0.7)],
+            'docker': [('kubernetes', 0.7)],
+            'kubernetes': [('docker', 0.7)],
+            'cicd': [('jenkins', 0.75), ('github actions', 0.75)],
+            'jenkins': [('cicd', 0.8), ('github actions', 0.7)],
+        },
+    },
+    'Programming Languages': {
+        'members': {'python', 'javascript', 'typescript', 'java', 'kotlin',
+                    'scala', 'go', 'rust', 'ruby', 'php', 'cpp', 'csharp',
+                    'swift', 'r'},
+        'transferable': {
+            'python': [('r', 0.4)],
+            'javascript': [('typescript', 0.9)],
+            'typescript': [('javascript', 0.85)],
+            'java': [('kotlin', 0.85), ('scala', 0.6), ('csharp', 0.5)],
+            'kotlin': [('java', 0.85), ('scala', 0.5)],
+            'go': [('rust', 0.5), ('java', 0.4)],
+        },
+    },
+    'Data & ML': {
+        'members': {'machine learning', 'deep learning', 'tensorflow',
+                    'pytorch', 'keras', 'scikit', 'pandas', 'numpy',
+                    'spark', 'hadoop', 'tableau', 'powerbi', 'data analysis',
+                    'data science', 'nlp', 'computer vision'},
+        'transferable': {
+            'tensorflow': [('pytorch', 0.85), ('keras', 0.8)],
+            'pytorch': [('tensorflow', 0.85), ('keras', 0.75)],
+            'machine learning': [('deep learning', 0.8), ('data science', 0.8)],
+            'pandas': [('numpy', 0.7), ('spark', 0.6)],
+        },
+    },
+    'Testing & Quality': {
+        'members': {'jest', 'mocha', 'pytest', 'junit', 'selenium',
+                    'cypress', 'playwright', 'testing', 'unit testing',
+                    'integration testing', 'tdd', 'bdd'},
+        'transferable': {
+            'jest': [('mocha', 0.8), ('pytest', 0.5)],
+            'cypress': [('playwright', 0.85), ('selenium', 0.7)],
+            'pytest': [('junit', 0.7), ('jest', 0.5)],
+            'tdd': [('bdd', 0.75), ('testing', 0.8)],
+        },
+    },
+}
+
+# Section detection patterns
 SECTION_PATTERNS = {
     'experience': re.compile(
         r'(work\s*experience|professional\s*experience|employment|experience)', re.I),
@@ -96,15 +192,13 @@ SECTION_PATTERNS = {
         r'(summary|objective|profile|about\s*me|career\s*objective)', re.I),
 }
 
-# Weighted importance of resume sections for the composite score
+# Updated weights: experience/projects matter more
 SECTION_WEIGHTS = {
-    'skills': 0.50,
-    'experience': 0.25,
-    'projects': 0.15,
+    'skills': 0.35,
+    'experience': 0.35,
+    'projects': 0.20,
     'education': 0.05,
     'certifications': 0.05,
-    'summary': 0.0,   # contributes to keyword pool but not scored separately
-    'other': 0.0,
 }
 
 # ---------------------------------------------------------------------------
@@ -133,55 +227,49 @@ def extract_text_from_docx(file_bytes: bytes) -> str:
 # ---------------------------------------------------------------------------
 
 def normalise(text: str) -> str:
-    """Lowercase, expand synonyms, strip punctuation, collapse whitespace."""
+    """Lowercase → synonym-expand → strip punctuation → collapse spaces."""
     text = text.lower()
-    # Replace common separators with spaces
     text = re.sub(r'[\/\-\+\|]', ' ', text)
-    # Apply multi-word synonyms first (longest first to avoid partial hits)
     for alias, canonical in sorted(SYNONYM_MAP.items(), key=lambda x: -len(x[0])):
         text = re.sub(r'\b' + re.escape(alias) + r'\b', canonical, text)
-    # Remove remaining punctuation except alphanumeric + space
     text = re.sub(r'[^a-z0-9\s]', ' ', text)
     text = re.sub(r'\s+', ' ', text).strip()
     return text
 
 
 def tokenise(text: str) -> list:
-    """Tokenise normalised text, remove stop-words and short tokens."""
     tokens = word_tokenize(text)
     return [t for t in tokens if t.isalpha() and t not in STOP_WORDS and len(t) > 2]
 
 
-def stem(word: str) -> str:
-    return STEMMER.stem(word)
+def extract_token_set(text: str) -> set:
+    """Return a set of unique normalised tokens from text."""
+    norm = normalise(text)
+    return set(tokenise(norm))
+
+
+def extract_bigram_set(text: str) -> set:
+    """Return 2-gram phrases after normalisation."""
+    norm = normalise(text)
+    tokens = [t for t in word_tokenize(norm) if t.isalpha() and len(t) > 1]
+    return {
+        f"{tokens[i]} {tokens[i+1]}"
+        for i in range(len(tokens) - 1)
+        if tokens[i] not in STOP_WORDS and tokens[i+1] not in STOP_WORDS
+    }
+
+
+def get_token_pool(text: str) -> set:
+    """All single tokens + bigrams from text."""
+    return extract_token_set(text) | extract_bigram_set(text)
 
 # ---------------------------------------------------------------------------
-# Resume section splitting
+# Section splitting
 # ---------------------------------------------------------------------------
 
 def split_into_sections(text: str) -> dict:
-    """
-    Split a resume into named sections.
-    Handles two formats:
-      1. Newline-based headings:  a short line that matches a section pattern
-      2. Inline colon headings:   "Skills: React, Node.js ..."
-
-    Returns a dict: section_name -> section_text.
-    Everything before the first recognised heading goes into 'summary'.
-    """
-    # --- Pass 1: try to split on inline "Section: content" patterns ---
-    inline_sections = {}
-    for section, pattern in SECTION_PATTERNS.items():
-        # Match "Skills: …" style inline headings
-        inline_re = re.compile(
-            r'(?:^|\n)' + pattern.pattern + r'\s*[:\-]\s*(.+?)(?=(?:\n[A-Z][^:]{0,40}[:\n])|$)',
-            re.I | re.S
-        )
-        m = inline_re.search(text)
-        if m:
-            inline_sections[section] = m.group(m.lastindex)
-
-    # --- Pass 2: standard newline-based heading split ---
+    """Split resume into named sections; fall back to full text per section."""
+    # Pass 1 – newline-based headings
     lines = text.split('\n')
     sections: dict = {}
     current = 'summary'
@@ -189,226 +277,383 @@ def split_into_sections(text: str) -> dict:
 
     for line in lines:
         stripped = line.strip()
-        matched_section = None
-        for section, pattern in SECTION_PATTERNS.items():
+        matched = None
+        for sec, pattern in SECTION_PATTERNS.items():
             if pattern.search(stripped) and len(stripped) < 80:
-                matched_section = section
+                matched = sec
                 break
-        if matched_section:
+        if matched:
             if buffer:
                 sections[current] = sections.get(current, '') + '\n' + '\n'.join(buffer)
-            current = matched_section
+            current = matched
             buffer = []
         else:
             buffer.append(line)
-
     if buffer:
         sections[current] = sections.get(current, '') + '\n' + '\n'.join(buffer)
 
-    # Merge: inline sections fill in any gaps from newline-split
-    for section, content in inline_sections.items():
-        if section not in sections or not sections[section].strip():
-            sections[section] = content
+    # Pass 2 – inline "Skills: …" patterns
+    for sec, pattern in SECTION_PATTERNS.items():
+        if sec not in sections or not sections[sec].strip():
+            m = re.search(
+                r'(?:^|\n)' + pattern.pattern + r'\s*[:\-]\s*(.+?)(?=\n[A-Z]|$)',
+                text, re.I | re.S
+            )
+            if m:
+                sections[sec] = m.group(m.lastindex)
 
-    # If still only 'summary' was found, do a best-effort keyword-based split
+    # Fallback – no sections detected → use full text for all
     detected = [s for s in sections if sections[s].strip() and s != 'summary']
     if not detected:
-        # Treat the whole text as contributing to every section pool
-        for section in ['skills', 'experience', 'projects', 'education', 'certifications']:
-            sections[section] = text
+        for sec in ['skills', 'experience', 'projects', 'education', 'certifications']:
+            sections[sec] = text
 
     return sections
 
 # ---------------------------------------------------------------------------
-# Keyword extraction with synonym + stem awareness
+# Semantic / transferable skill matching
 # ---------------------------------------------------------------------------
 
-def extract_keyword_set(text: str, top_n: int = 60) -> set:
+def find_cluster(skill: str) -> str | None:
+    """Return the cluster name for a skill, or None."""
+    for cluster_name, cluster in SKILL_CLUSTERS.items():
+        if skill in cluster['members']:
+            return cluster_name
+    return None
+
+
+def transferable_score(wanted: str, resume_pool: set) -> float:
     """
-    Extract meaningful keyword tokens from text after normalisation.
-    Returns a set of stemmed tokens for robust matching.
+    Return a [0, 1] score for `wanted` using transferable skill credit.
+    1.0 = exact match, <1.0 = partial from related skill.
     """
-    norm = normalise(text)
-    tokens = tokenise(norm)
-    # Build frequency map on stems, but keep original token for display
-    freq = {}
-    for t in tokens:
-        s = stem(t)
-        if s not in freq:
-            freq[s] = {'count': 0, 'display': t}
-        freq[s]['count'] += 1
-    top = sorted(freq.items(), key=lambda x: -x[1]['count'])[:top_n]
-    return {item[1]['display'] for item in top}
+    if wanted in resume_pool or any(stem(wanted) == stem(t) for t in resume_pool):
+        return 1.0
+
+    best = 0.0
+    for cluster in SKILL_CLUSTERS.values():
+        transfers = cluster['transferable'].get(wanted, [])
+        for alt, credit in transfers:
+            if alt in resume_pool or any(stem(alt) == stem(t) for t in resume_pool):
+                best = max(best, credit)
+
+    return best
 
 
-def extract_phrase_keywords(text: str) -> set:
+def cluster_coverage(resume_pool: set, jd_pool: set) -> dict:
     """
-    Also extract 2-gram tech phrases (e.g. 'machine learning', 'restful api').
+    For each cluster that appears in the JD, calculate what fraction
+    of its JD members the resume covers (with transferable credit).
+    Returns {cluster_name: {coverage, jd_count, resume_count, matched, transferable}}
     """
-    norm = normalise(text)
-    tokens = word_tokenize(norm)
-    tokens = [t for t in tokens if t.isalpha() and len(t) > 1]
-    bigrams = {f"{tokens[i]} {tokens[i+1]}" for i in range(len(tokens) - 1)
-               if tokens[i] not in STOP_WORDS and tokens[i+1] not in STOP_WORDS}
-    return bigrams
-
-
-def get_all_keywords(text: str) -> set:
-    return extract_keyword_set(text) | extract_phrase_keywords(text)
-
-# ---------------------------------------------------------------------------
-# Partial / semantic matching helpers
-# ---------------------------------------------------------------------------
-
-def tokens_match(tok_a: str, tok_b: str) -> bool:
-    """True if tokens are identical or share the same stem."""
-    if tok_a == tok_b:
-        return True
-    if stem(tok_a) == stem(tok_b):
-        return True
-    return False
-
-
-def keyword_in_text(keyword: str, text_tokens: set, stemmed_tokens: set) -> bool:
-    """
-    Return True if `keyword` (possibly multi-word) appears in the token sets,
-    using partial/stem matching.
-    """
-    kw_parts = keyword.split()
-    if len(kw_parts) == 1:
-        s = stem(kw_parts[0])
-        return s in stemmed_tokens or kw_parts[0] in text_tokens
-    # For multi-word: all words must individually match
-    for part in kw_parts:
-        if part in STOP_WORDS:
+    results = {}
+    for cluster_name, cluster in SKILL_CLUSTERS.items():
+        # Which cluster members appear in the JD?
+        jd_cluster_skills = [s for s in cluster['members'] if
+                              s in jd_pool or
+                              any(stem(s) == stem(t) for t in jd_pool)]
+        if not jd_cluster_skills:
             continue
-        if stem(part) not in stemmed_tokens and part not in text_tokens:
-            return False
-    return True
+
+        exact_matched = []
+        transfer_matched = []
+        total_credit = 0.0
+
+        for skill in jd_cluster_skills:
+            score = transferable_score(skill, resume_pool)
+            if score >= 0.95:
+                exact_matched.append(skill)
+                total_credit += 1.0
+            elif score > 0:
+                transfer_matched.append(skill)
+                total_credit += score
+
+        coverage = total_credit / len(jd_cluster_skills) if jd_cluster_skills else 0.0
+        results[cluster_name] = {
+            'coverage': round(coverage * 100, 1),
+            'jd_count': len(jd_cluster_skills),
+            'matched_exact': exact_matched,
+            'matched_transfer': transfer_matched,
+            'missing': [s for s in jd_cluster_skills
+                        if s not in exact_matched and s not in transfer_matched],
+        }
+
+    return results
 
 # ---------------------------------------------------------------------------
-# Section-aware weighted scoring
+# Section-aware scoring with transferable credit
 # ---------------------------------------------------------------------------
 
-def score_section(section_text: str, jd_stemmed: set, jd_tokens: set) -> float:
+def score_section(section_text: str, jd_pool: set, jd_skills: set) -> float:
     """
-    Return the fraction of JD keywords matched within this section's text.
+    Measure how well a section covers the JD using transferable credit.
+    Returns [0, 1].
     """
     if not section_text.strip():
         return 0.0
-    sec_tokens = get_all_keywords(section_text)
-    sec_stemmed = {stem(t.split()[0]) for t in sec_tokens}
+    sec_pool = get_token_pool(section_text)
+    if not jd_skills:
+        return 0.0
 
-    matched = sum(
-        1 for kw in jd_tokens if keyword_in_text(kw, sec_tokens, sec_stemmed)
-    )
-    return matched / len(jd_tokens) if jd_tokens else 0.0
+    total = 0.0
+    for skill in jd_skills:
+        total += transferable_score(skill, sec_pool)
+
+    return total / len(jd_skills)
 
 
-def compute_weighted_score(sections: dict, jd_stemmed: set, jd_tokens: set) -> dict:
-    """
-    Compute per-section match ratios and the weighted composite score.
-    """
-    section_scores = {}
-    for section in ['skills', 'experience', 'projects', 'education', 'certifications', 'summary']:
-        text = sections.get(section, '')
-        section_scores[section] = round(score_section(text, jd_stemmed, jd_tokens) * 100, 1)
-
-    weighted = 0.0
-    for section, weight in SECTION_WEIGHTS.items():
-        if weight > 0:
-            weighted += (section_scores.get(section, 0) / 100) * weight
-
-    return {
-        'section_scores': section_scores,
-        'weighted_score': round(weighted * 100, 1),
-    }
+def compute_section_scores(sections: dict, jd_pool: set, jd_skills: set) -> dict:
+    scores = {}
+    for sec in ['skills', 'experience', 'projects', 'education', 'certifications', 'summary']:
+        scores[sec] = round(score_section(sections.get(sec, ''), jd_pool, jd_skills) * 100, 1)
+    return scores
 
 # ---------------------------------------------------------------------------
-# ATS scoring
+# Keyword-level ATS matching (with soft/transferable credit)
 # ---------------------------------------------------------------------------
 
-def compute_ats_score(jd_keywords: set, resume_full_tokens: set,
-                      resume_full_stemmed: set) -> dict:
+def compute_keyword_match(jd_pool: set, resume_pool: set) -> dict:
     """
-    ATS Score = (Matched JD Keywords / Total JD Keywords) × 100
-    Returns matched, missing, and the score.
+    For every JD keyword compute an exact or transferable match score.
+    Returns matched, partial, missing lists and an overall coverage %.
     """
-    matched = []
+    matched_exact = []
+    matched_partial = []
     missing = []
 
-    for kw in jd_keywords:
-        if keyword_in_text(kw, resume_full_tokens, resume_full_stemmed):
-            matched.append(kw)
+    for kw in sorted(jd_pool):
+        score = transferable_score(kw, resume_pool)
+        if score >= 0.95:
+            matched_exact.append(kw)
+        elif score >= 0.4:
+            matched_partial.append({'keyword': kw, 'credit': round(score, 2)})
         else:
             missing.append(kw)
 
-    total = len(jd_keywords)
-    ats_score = round(len(matched) / total * 100, 1) if total else 0.0
+    total = len(jd_pool)
+    exact_count = len(matched_exact)
+    partial_credit = sum(p['credit'] for p in matched_partial)
+    effective_matched = exact_count + partial_credit
+
+    coverage = round(effective_matched / total * 100, 1) if total else 0.0
 
     return {
-        'ats_score': ats_score,
-        'matched_keywords': sorted(matched),
-        'missing_keywords': sorted(missing),
+        'matched_exact': matched_exact,
+        'matched_partial': matched_partial,
+        'missing': missing,
+        'coverage': coverage,
         'total_jd_keywords': total,
-        'total_matched': len(matched),
+        'effective_matched': round(effective_matched, 1),
     }
+
+# ---------------------------------------------------------------------------
+# Score calibration
+# Stretch raw [0,1] into recruiter-scale bands:
+#   excellent → 80–95, strong → 70–85, moderate → 50–70, weak → 20–50
+# ---------------------------------------------------------------------------
+
+def calibrate_score(raw: float) -> float:
+    """
+    Apply a soft calibration so scores feel recruiter-realistic.
+    raw is already [0, 100].
+    """
+    r = raw / 100.0
+    # Sigmoid-like stretch that raises the floor and compresses the ceiling
+    # f(r) = 20 + 75 * (1 - exp(-3*r)) / (1 + exp(-3*(r-0.5))) normalised
+    # Simpler: piecewise linear calibration
+    if r <= 0.0:
+        return 0.0
+    if r >= 1.0:
+        return 95.0
+
+    # Piecewise: poor→weak→moderate→strong→excellent
+    # Raw 0.0 → 0, 0.25 → 30, 0.5 → 55, 0.75 → 75, 1.0 → 95
+    breakpoints = [(0.0, 0.0), (0.25, 30.0), (0.50, 55.0), (0.75, 75.0), (1.0, 95.0)]
+    for i in range(len(breakpoints) - 1):
+        r0, s0 = breakpoints[i]
+        r1, s1 = breakpoints[i + 1]
+        if r0 <= r <= r1:
+            t = (r - r0) / (r1 - r0)
+            return round(s0 + t * (s1 - s0), 1)
+    return round(raw, 1)
+
+# ---------------------------------------------------------------------------
+# Confidence / reasoning engine
+# ---------------------------------------------------------------------------
+
+def build_confidence_reasoning(
+    cluster_results: dict,
+    section_scores: dict,
+    keyword_result: dict,
+    sections: dict,
+) -> dict:
+    """
+    Produce human-readable reasoning bullets for the UI.
+    """
+    reasons = {
+        'matched_clusters': [],
+        'partial_clusters': [],
+        'missing_clusters': [],
+        'experience_found': False,
+        'experience_notes': [],
+        'projects_found': False,
+        'project_notes': [],
+        'missing_critical': [],
+        'strengths': [],
+    }
+
+    # Cluster reasoning
+    for cname, data in cluster_results.items():
+        cov = data['coverage']
+        if cov >= 70:
+            reasons['matched_clusters'].append({
+                'cluster': cname,
+                'coverage': cov,
+                'skills': data['matched_exact'],
+            })
+            if cov >= 80:
+                reasons['strengths'].append(
+                    f"Strong {cname} coverage ({cov}%) — {', '.join(data['matched_exact'][:4])}"
+                )
+        elif cov >= 30:
+            reasons['partial_clusters'].append({
+                'cluster': cname,
+                'coverage': cov,
+                'matched': data['matched_exact'] + data['matched_transfer'],
+                'missing': data['missing'],
+            })
+        else:
+            reasons['missing_clusters'].append({
+                'cluster': cname,
+                'coverage': cov,
+                'missing': data['missing'],
+            })
+            if data['jd_count'] >= 2:
+                reasons['missing_critical'].append(
+                    f"{cname}: missing {', '.join(data['missing'][:3])}"
+                )
+
+    # Experience reasoning
+    exp_score = section_scores.get('experience', 0)
+    reasons['experience_found'] = exp_score >= 30
+    if exp_score >= 70:
+        reasons['experience_notes'].append('Strong experience alignment with the role requirements.')
+    elif exp_score >= 40:
+        reasons['experience_notes'].append('Relevant experience found; some gaps with JD specifics.')
+    elif sections.get('experience', '').strip():
+        reasons['experience_notes'].append('Experience section present but limited keyword overlap with JD.')
+    else:
+        reasons['experience_notes'].append('No distinct experience section detected.')
+
+    # Projects reasoning
+    proj_score = section_scores.get('projects', 0)
+    reasons['projects_found'] = proj_score >= 25
+    if proj_score >= 60:
+        reasons['project_notes'].append('Projects demonstrate relevant technical skills.')
+    elif proj_score >= 25:
+        reasons['project_notes'].append('Some relevant projects found.')
+    elif sections.get('projects', '').strip():
+        reasons['project_notes'].append('Projects present but do not strongly mirror JD requirements.')
+    else:
+        reasons['project_notes'].append('No distinct projects section detected.')
+
+    # Missing critical keywords — filter to real skill-like terms only (no noise bigrams)
+    if keyword_result['missing'] and not reasons['missing_critical']:
+        skill_missing = [
+            kw for kw in keyword_result['missing']
+            if (
+                find_cluster(kw) is not None or
+                len(kw) >= 4
+            ) and ' ' not in kw  # exclude noisy bigrams
+        ]
+        if skill_missing:
+            reasons['missing_critical'].append(
+                f"Missing keywords: {', '.join(skill_missing[:6])}"
+            )
+
+    return reasons
 
 # ---------------------------------------------------------------------------
 # Master compute function
 # ---------------------------------------------------------------------------
 
 def compute_match(resume_text: str, jd_text: str) -> dict:
-    # 1. Split resume into sections
+    # 1 – Section splitting
     sections = split_into_sections(resume_text)
 
-    # 2. Full resume token sets
-    resume_full_tokens = get_all_keywords(resume_text)
-    resume_full_stemmed = {stem(t.split()[0]) for t in resume_full_tokens}
+    # 2 – Token pools
+    resume_pool = get_token_pool(resume_text)
+    jd_pool = get_token_pool(jd_text)
 
-    # 3. JD token sets
-    jd_keywords = get_all_keywords(jd_text)
-    jd_stemmed = {stem(t.split()[0]) for t in jd_keywords}
+    # 3 – Extract skills from JD (tokens that appear in any cluster)
+    jd_skills = {t for t in jd_pool if find_cluster(t) is not None or len(t) > 3}
 
-    # 4. ATS score (keyword coverage)
-    ats = compute_ats_score(jd_keywords, resume_full_tokens, resume_full_stemmed)
+    # 4 – Cluster coverage analysis
+    cluster_results = cluster_coverage(resume_pool, jd_pool)
 
-    # 5. Weighted section score
-    weighted = compute_weighted_score(sections, jd_stemmed, jd_keywords)
+    # 5 – Keyword-level match (with soft/transferable credit)
+    keyword_result = compute_keyword_match(jd_pool, resume_pool)
 
-    # 6. Final blended score: 60% ATS keyword coverage + 40% weighted section
-    final_score = round(
-        0.60 * ats['ats_score'] + 0.40 * weighted['weighted_score'], 1
+    # 6 – Section scores
+    section_scores = compute_section_scores(sections, jd_pool, jd_skills)
+
+    # 7 – Weighted composite (new weights: Skills 35, Exp 35, Proj 20, Edu/Cert 10)
+    weighted_raw = sum(
+        (section_scores.get(sec, 0) / 100) * weight
+        for sec, weight in SECTION_WEIGHTS.items()
     )
+    weighted_score = round(weighted_raw * 100, 1)
 
-    # 7. Keyword coverage percentage
-    keyword_coverage = ats['ats_score']
+    # 8 – Cluster score: average coverage across JD-relevant clusters
+    cluster_score = 0.0
+    if cluster_results:
+        cluster_score = sum(c['coverage'] for c in cluster_results.values()) / len(cluster_results)
 
-    # 8. Experience match comes from the weighted section score for 'experience'
-    experience_match = weighted['section_scores'].get('experience', 0.0)
+    # 9 – Raw blended score
+    # 40% keyword coverage + 35% weighted sections + 25% cluster coverage
+    kw_coverage = keyword_result['coverage']
+    raw_blended = (0.40 * kw_coverage + 0.35 * weighted_score + 0.25 * cluster_score)
+
+    # 10 – Calibrate into recruiter scale
+    final_score = calibrate_score(raw_blended)
+
+    # 11 – Confidence reasoning
+    reasoning = build_confidence_reasoning(cluster_results, section_scores, keyword_result, sections)
+
+    # 12 – ATS-style score (raw keyword coverage before calibration)
+    ats_score = round(kw_coverage, 1)
 
     return {
-        # Primary scores
         'match_percentage': final_score,
-        'ats_score': ats['ats_score'],
-        'keyword_coverage': keyword_coverage,
-        'experience_match': experience_match,
+        'ats_score': ats_score,
+        'keyword_coverage': round(kw_coverage, 1),
+        'experience_match': section_scores.get('experience', 0),
+        'projects_match': section_scores.get('projects', 0),
+        'weighted_score': weighted_score,
+        'cluster_score': round(cluster_score, 1),
 
         # Keyword results
-        'matched_keywords': ats['matched_keywords'],
-        'missing_keywords': ats['missing_keywords'],
+        'matched_keywords': keyword_result['matched_exact'],
+        'partial_keywords': keyword_result['matched_partial'],
+        'missing_keywords': keyword_result['missing'],
 
         # Section breakdown
-        'section_scores': weighted['section_scores'],
-        'weighted_score': weighted['weighted_score'],
+        'section_scores': section_scores,
 
-        # Debugging info
+        # Cluster breakdown
+        'cluster_results': cluster_results,
+
+        # Confidence reasoning
+        'reasoning': reasoning,
+
+        # Debug
         'debug': {
-            'total_jd_keywords': ats['total_jd_keywords'],
-            'total_matched': ats['total_matched'],
-            'exact_matched': ats['matched_keywords'],
-            'exact_missing': ats['missing_keywords'],
+            'total_jd_keywords': keyword_result['total_jd_keywords'],
+            'total_matched': len(keyword_result['matched_exact']),
+            'partial_matched': len(keyword_result['matched_partial']),
+            'effective_matched': keyword_result['effective_matched'],
             'sections_found': list(sections.keys()),
+            'raw_blended': round(raw_blended, 1),
         },
     }
 
@@ -434,15 +679,13 @@ def match():
 
     if not resume_text and 'resume_text' in request.form:
         resume_text = request.form['resume_text']
-
     if 'jd_text' in request.form:
         jd_text = request.form['jd_text']
 
     if not resume_text or not jd_text:
         return jsonify({'error': 'Both resume and job description are required.'}), 400
 
-    result = compute_match(resume_text, jd_text)
-    return jsonify(result)
+    return jsonify(compute_match(resume_text, jd_text))
 
 
 @app.route('/api/health', methods=['GET'])
