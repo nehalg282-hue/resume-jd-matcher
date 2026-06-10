@@ -435,7 +435,13 @@ def compute_keyword_match(jd_pool: set, resume_pool: set) -> dict:
     partial_credit = sum(p['credit'] for p in matched_partial)
     effective_matched = exact_count + partial_credit
 
-    coverage = round(effective_matched / total * 100, 1) if total else 0.0
+    # Concave (square-root) coverage so missing a few keywords doesn't crater the score.
+    # Linear:   50% matched → 50 coverage
+    # Concave:  50% matched → 71 coverage  (sqrt(0.5) * 100)
+    # This means getting the core skills matters far more than having every single keyword.
+    linear_ratio = effective_matched / total if total else 0.0
+    concave_ratio = math.sqrt(linear_ratio)
+    coverage = round(concave_ratio * 100, 1)
 
     return {
         'matched_exact': matched_exact,
@@ -444,6 +450,7 @@ def compute_keyword_match(jd_pool: set, resume_pool: set) -> dict:
         'coverage': coverage,
         'total_jd_keywords': total,
         'effective_matched': round(effective_matched, 1),
+        'linear_coverage': round(linear_ratio * 100, 1),
     }
 
 # ---------------------------------------------------------------------------
@@ -454,21 +461,31 @@ def compute_keyword_match(jd_pool: set, resume_pool: set) -> dict:
 
 def calibrate_score(raw: float) -> float:
     """
-    Apply a soft calibration so scores feel recruiter-realistic.
-    raw is already [0, 100].
+    Generous piecewise calibration — rewards partial coverage, doesn't punish
+    for missing non-essential keywords.
+
+    Mapping (raw → calibrated):
+      0%  →  0%   (truly empty / no match)
+      20% → 38%   (weak but some alignment)
+      40% → 58%   (moderate — half the essentials)
+      60% → 72%   (strong — most essentials covered)
+      80% → 84%   (excellent)
+     100% → 95%   (near-perfect)
     """
     r = raw / 100.0
-    # Sigmoid-like stretch that raises the floor and compresses the ceiling
-    # f(r) = 20 + 75 * (1 - exp(-3*r)) / (1 + exp(-3*(r-0.5))) normalised
-    # Simpler: piecewise linear calibration
     if r <= 0.0:
         return 0.0
     if r >= 1.0:
         return 95.0
 
-    # Piecewise: poor→weak→moderate→strong→excellent
-    # Raw 0.0 → 0, 0.25 → 30, 0.5 → 55, 0.75 → 75, 1.0 → 95
-    breakpoints = [(0.0, 0.0), (0.25, 30.0), (0.50, 55.0), (0.75, 75.0), (1.0, 95.0)]
+    breakpoints = [
+        (0.00,  0.0),
+        (0.20, 38.0),
+        (0.40, 58.0),
+        (0.60, 72.0),
+        (0.80, 84.0),
+        (1.00, 95.0),
+    ]
     for i in range(len(breakpoints) - 1):
         r0, s0 = breakpoints[i]
         r1, s1 = breakpoints[i + 1]
@@ -610,9 +627,11 @@ def compute_match(resume_text: str, jd_text: str) -> dict:
         cluster_score = sum(c['coverage'] for c in cluster_results.values()) / len(cluster_results)
 
     # 9 – Raw blended score
-    # 40% keyword coverage + 35% weighted sections + 25% cluster coverage
+    # Weights: cluster coverage is the most lenient (grouped, transferable) signal so
+    # we give it the highest share. Keyword coverage already uses a concave curve.
+    # 30% keyword coverage + 30% weighted sections + 40% cluster coverage
     kw_coverage = keyword_result['coverage']
-    raw_blended = (0.40 * kw_coverage + 0.35 * weighted_score + 0.25 * cluster_score)
+    raw_blended = (0.30 * kw_coverage + 0.30 * weighted_score + 0.40 * cluster_score)
 
     # 10 – Calibrate into recruiter scale
     final_score = calibrate_score(raw_blended)
