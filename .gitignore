@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.env
+venv/
+.venv/
+*.egg
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# NLTK data (downloaded at runtime)
+nltk_data/
+/home/runner/nltk_data/
+
+# Node / frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Replit internals
+.replit
+.upm/
+.cache/
+.pythonlibs/
+uv.lock
+replit.nix
+
+# OS
+.DS_Store
+Thumbs.db
