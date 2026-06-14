@@ -190,8 +190,12 @@ const DebugPanel = ({ debug }) => {
 export default function App() {
   const [resumeFile, setResumeFile] = useState(null);
   const [resumeText, setResumeText] = useState('');
-  const [jdText, setJdText] = useState('');
   const [inputMode, setInputMode] = useState('text');
+
+  const [jdFile, setJdFile] = useState(null);
+  const [jdText, setJdText] = useState('');
+  const [jdInputMode, setJdInputMode] = useState('text');
+
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState('');
@@ -201,19 +205,26 @@ export default function App() {
     if (f) { setResumeFile(f); setResumeText(''); }
   };
 
+  const handleJdFileChange = (e) => {
+    const f = e.target.files[0];
+    if (f) { setJdFile(f); setJdText(''); }
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError(''); setResult(null);
     if (inputMode === 'text' && !resumeText.trim()) { setError('Please enter your resume text.'); return; }
     if (inputMode === 'file' && !resumeFile) { setError('Please upload a resume file.'); return; }
-    if (!jdText.trim()) { setError('Please enter the job description.'); return; }
+    if (jdInputMode === 'text' && !jdText.trim()) { setError('Please enter the job description.'); return; }
+    if (jdInputMode === 'file' && !jdFile) { setError('Please upload a job description file.'); return; }
 
     setLoading(true);
     try {
       const fd = new FormData();
       if (inputMode === 'file') fd.append('resume_file', resumeFile);
       else fd.append('resume_text', resumeText);
-      fd.append('jd_text', jdText);
+      if (jdInputMode === 'file') fd.append('jd_file', jdFile);
+      else fd.append('jd_text', jdText);
       const res = await axios.post('/api/match', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
       setResult(res.data);
     } catch (err) {
@@ -224,7 +235,9 @@ export default function App() {
   };
 
   const handleReset = () => {
-    setResult(null); setError(''); setResumeText(''); setJdText(''); setResumeFile(null);
+    setResult(null); setError('');
+    setResumeText(''); setResumeFile(null); setInputMode('text');
+    setJdText(''); setJdFile(null); setJdInputMode('text');
   };
 
   const sectionMeta = [
@@ -280,10 +293,34 @@ export default function App() {
               </div>
 
               <div className="form-col">
-                <div className="col-head"><h2>Job Description</h2></div>
-                <textarea className="text-input" rows={15}
-                  placeholder="Paste the job description here…"
-                  value={jdText} onChange={e => setJdText(e.target.value)} />
+                <div className="col-head">
+                  <h2>Job Description</h2>
+                  <div className="toggle-group">
+                    <button type="button" className={`tog ${jdInputMode === 'text' ? 'active' : ''}`}
+                      onClick={() => setJdInputMode('text')}>Paste Text</button>
+                    <button type="button" className={`tog ${jdInputMode === 'file' ? 'active' : ''}`}
+                      onClick={() => setJdInputMode('file')}>Upload File</button>
+                  </div>
+                </div>
+                {jdInputMode === 'text'
+                  ? <textarea className="text-input" rows={15}
+                      placeholder="Paste the job description here…"
+                      value={jdText} onChange={e => setJdText(e.target.value)} />
+                  : (
+                    <label htmlFor="jdf" className="file-drop">
+                      <input type="file" id="jdf" accept=".pdf,.docx,.txt"
+                        onChange={handleJdFileChange} style={{ display: 'none' }} />
+                      {jdFile
+                        ? <><span className="file-icon">✅</span>
+                            <span className="file-nm">{jdFile.name}</span>
+                            <span className="file-sz">({(jdFile.size / 1024).toFixed(1)} KB)</span></>
+                        : <><span style={{ fontSize: '2rem' }}>⬆️</span>
+                            <span>Click to upload PDF, DOCX, or TXT</span>
+                            <span className="file-hint">Max 10 MB</span></>
+                      }
+                    </label>
+                  )
+                }
               </div>
             </div>
 

@@ -133,7 +133,18 @@ def match():
 
     if not resume_text and 'resume_text' in request.form:
         resume_text = request.form['resume_text']
-    if 'jd_text' in request.form:
+    if 'jd_file' in request.files:
+        jf = request.files['jd_file']
+        jd_filename = jf.filename.lower()
+        jd_bytes = jf.read()
+        if jd_filename.endswith('.pdf'):
+            jd_text = extract_text_from_pdf(jd_bytes)
+        elif jd_filename.endswith('.docx'):
+            jd_text = extract_text_from_docx(jd_bytes)
+        else:
+            jd_text = jd_bytes.decode('utf-8', errors='ignore')
+
+    if not jd_text and 'jd_text' in request.form:
         jd_text = request.form['jd_text']
 
     if not resume_text or not jd_text:
